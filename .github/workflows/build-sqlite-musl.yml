@@ -25,17 +25,73 @@ jobs:
             qemu-platform: arm64
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7.0.1
-
-      - name: Verify amalgamation sources
+      - name: Download latest SQLite amalgamation
         run: |
-          for source in shell.c sqlite3.c sqlite3.h; do
-            if [ ! -f "$source" ]; then
-              echo "::error::Required SQLite amalgamation source is missing: $source"
-              exit 1
-            fi
-          done
+          python3 - <<'PY'
+          import csv
+          import hashlib
+          import io
+          import re
+          import shutil
+          import urllib.request
+          import zipfile
+
+          download_page = "https://www.sqlite.org/download.html"
+          request = urllib.request.Request(
+              download_page,
+              headers={"User-Agent": "sqlite-musl-build/1.0"},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              page = response.read().decode("utf-8")
+
+          metadata = re.search(
+              r"<!-- Download product data for scripts to read\s*(.*?)\s*-->",
+              page,
+              re.DOTALL,
+          )
+          if metadata is None:
+              raise SystemExit("SQLite download metadata was not found")
+
+          rows = csv.DictReader(io.StringIO(metadata.group(1)))
+          releases = [
+              row for row in rows
+              if re.fullmatch(
+                  r"\d{4}/sqlite-amalgamation-\d+\.zip",
+                  row.get("RELATIVE-URL", ""),
+              )
+          ]
+          if not releases:
+              raise SystemExit("No SQLite amalgamation archive was listed")
+
+          release = max(
+              releases,
+              key=lambda row: int(
+                  re.search(r"-(\d+)\.zip$", row["RELATIVE-URL"]).group(1)
+              ),
+          )
+          archive_url = "https://www.sqlite.org/" + release["RELATIVE-URL"]
+          with urllib.request.urlopen(archive_url, timeout=60) as response:
+              archive_data = response.read()
+
+          if len(archive_data) != int(release["SIZE-IN-BYTES"]):
+              raise SystemExit("SQLite archive size does not match published metadata")
+          archive_hash = hashlib.sha3_256(archive_data).hexdigest()
+          if archive_hash.lower() != release["SHA3-HASH"].lower():
+              raise SystemExit("SQLite archive SHA3-256 does not match published metadata")
+
+          archive_name = release["RELATIVE-URL"].rsplit("/", 1)[-1]
+          archive_root = archive_name.removesuffix(".zip")
+          required_files = ("shell.c", "sqlite3.c", "sqlite3.h")
+          with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
+              for filename in required_files:
+                  member = f"{archive_root}/{filename}"
+                  if member not in archive.namelist():
+                      raise SystemExit(f"SQLite archive is missing {filename}")
+                  with archive.open(member) as source, open(filename, "wb") as target:
+                      shutil.copyfileobj(source, target)
+
+          print(f"Downloaded and verified SQLite {release['VERSION']} ({archive_name})")
+          PY
 
       - name: Set up QEMU
         if: matrix.arch != 'x86_64'

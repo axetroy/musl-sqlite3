@@ -26,14 +26,11 @@ SQLite 官方预编译二进制依赖较高版本的 glibc，在低版本 Linux 
 
 ## 3. 前置条件
 
-### 3.1 仓库文件要求
+### 3.1 CI 实时下载源码
 
-仓库根目录（或指定路径）下需包含 SQLite amalgamation 源码包中的以下文件：
-- `sqlite3.c`
-- `sqlite3.h`
-- `shell.c`
+无需将 SQLite 源码提交到仓库。每次 CI 运行时，从 SQLite 官方下载页解析最新发布的 `sqlite-amalgamation-*.zip`，并根据官方元数据校验文件大小和 SHA3-256 后，提取 `shell.c`、`sqlite3.c`、`sqlite3.h`。CI runner 需要可访问 `www.sqlite.org` 并提供 Python 3 标准库。
 
-**说明**：SQLite 官方推荐使用 amalgamation（合并源码）进行编译，因为所有代码生成和转换步骤已完成，编译最简单，且编译器能进行更激进的优化（性能提升 5%~10%）。从 SQLite 官网下载 `sqlite-amalgamation-*.zip` 解压即可获得上述三个文件。
+官方 amalgamation 压缩包包含 CLI 和静态编译所需的上述三个文件。使用官方发布页而非固定版本号，可以在每次运行时构建当时最新的 SQLite 稳定发布版。
 
 ### 3.2 GitHub Actions 权限
 
@@ -80,17 +77,58 @@ jobs:
             qemu-platform: arm64
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7.0.1
-
-      - name: Verify amalgamation sources
+      - name: Download latest SQLite amalgamation
         run: |
-          for source in shell.c sqlite3.c sqlite3.h; do
-            if [ ! -f "$source" ]; then
-              echo "::error::Required SQLite amalgamation source is missing: $source"
-              exit 1
-            fi
-          done
+          python3 - <<'PY'
+          import csv, hashlib, io, re, shutil, urllib.request, zipfile
+
+          request = urllib.request.Request(
+              "https://www.sqlite.org/download.html",
+              headers={"User-Agent": "sqlite-musl-build/1.0"},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              page = response.read().decode("utf-8")
+          metadata = re.search(
+              r"<!-- Download product data for scripts to read\s*(.*?)\s*-->",
+              page, re.DOTALL,
+          )
+          if metadata is None:
+              raise SystemExit("SQLite download metadata was not found")
+          rows = csv.DictReader(io.StringIO(metadata.group(1)))
+          releases = [
+              row for row in rows
+              if re.fullmatch(
+                  r"\d{4}/sqlite-amalgamation-\d+\.zip",
+                  row.get("RELATIVE-URL", ""),
+              )
+          ]
+          if not releases:
+              raise SystemExit("No SQLite amalgamation archive was listed")
+          release = max(
+              releases,
+              key=lambda row: int(
+                  re.search(r"-(\d+)\.zip$", row["RELATIVE-URL"]).group(1)
+              ),
+          )
+          with urllib.request.urlopen(
+              "https://www.sqlite.org/" + release["RELATIVE-URL"], timeout=60
+          ) as response:
+              data = response.read()
+          if len(data) != int(release["SIZE-IN-BYTES"]):
+              raise SystemExit("SQLite archive size does not match metadata")
+          if hashlib.sha3_256(data).hexdigest() != release["SHA3-HASH"].lower():
+              raise SystemExit("SQLite archive SHA3-256 does not match metadata")
+          archive_name = release["RELATIVE-URL"].rsplit("/", 1)[-1]
+          root = archive_name.removesuffix(".zip")
+          with zipfile.ZipFile(io.BytesIO(data)) as archive:
+              for filename in ("shell.c", "sqlite3.c", "sqlite3.h"):
+                  member = f"{root}/{filename}"
+                  if member not in archive.namelist():
+                      raise SystemExit(f"SQLite archive is missing {filename}")
+                  with archive.open(member) as source, open(filename, "wb") as target:
+                      shutil.copyfileobj(source, target)
+          print(f"Downloaded and verified SQLite {release['VERSION']}")
+          PY
 
       # 仅 x86_64 可直接在 runner 上运行
       - name: Set up QEMU
@@ -149,7 +187,7 @@ jobs:
 **（1）基础镜像选择**
 - 所有架构统一使用官方多架构镜像 `alpine:latest`，并通过 `--platform` 选择 `linux/386`、`linux/amd64` 或 `linux/arm64`。
 - `apk add --no-cache build-base` 从对应 Alpine 版本的仓库安装当前可用版本的编译工具链。
-- Workflow 使用当前核对到的最新稳定版 Actions：`actions/checkout@v7.0.1`、`docker/setup-qemu-action@v4.4.0` 和 `actions/upload-artifact@v7.0.2`。
+- Workflow 使用当前核对到的最新稳定版 Actions：`docker/setup-qemu-action@v4.4.0` 和 `actions/upload-artifact@v7.0.2`。SQLite amalgamation 在每次运行时从官方发布页动态发现、下载并校验。
 
 **（2）编译命令的取舍**
 - `shell.c sqlite3.c`：同时编译命令行入口和 SQLite 库。
@@ -210,7 +248,7 @@ Workflow 成功后，在 Actions 运行页面底部的 “Artifacts” 区域可
 x86 和 arm64 构建通过 QEMU 用户态模拟执行，编译速度慢于原生。对于 SQLite 这种规模（单文件 amalgamation），耗时仍在可接受范围内。若未来需要编译更大的项目，可考虑使用 GitHub Actions 的目标架构原生 runner。
 
 **（3）SQLite 版本升级**
-当需要升级 SQLite 版本时，只需替换仓库中的 `sqlite3.c`、`sqlite3.h`、`shell.c` 三个文件，重新触发 Workflow 即可。编译选项如需调整（如增删 `SQLITE_ENABLE_*` 宏），修改 Workflow 中的 `gcc` 命令行。
+Workflow 每次运行时自动获取 SQLite 官方下载页列出的最新 amalgamation，并使用官方 SHA3-256 元数据校验，无需手动替换源码文件。编译选项如需调整（如增删 `SQLITE_ENABLE_*` 宏），修改 Workflow 中的 `gcc` 命令行。
 
 **（4）滚动更新与可复现性**
 按“依赖更新到最新”的要求使用 `alpine:latest` 以及 Alpine 仓库当前可用的 `build-base`。这会自动使用更新的 Alpine、musl 和编译器版本，但构建结果不再完全可复现；如需可复现构建，应将镜像和依赖版本固定到明确版本或镜像 digest。
