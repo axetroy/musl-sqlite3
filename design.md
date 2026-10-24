@@ -123,11 +123,23 @@ jobs:
             exit 1
           fi
 
-      # 对于 x86_64，可直接在 runner 上运行版本检查
-      - name: Smoke test (x86_64 only)
-        if: matrix.arch == 'x86_64'
+      # 在目标架构 Alpine 容器内执行，非 x86_64 架构通过 QEMU 运行
+      - name: Smoke test in target Alpine
         run: |
-          ./sqlite3-linux-x86_64 --version
+          docker run --rm \
+            -v "${{ github.workspace }}:/work" \
+            -w /work \
+            --platform ${{ matrix.platform }} \
+            alpine:latest \
+            sh -c '
+              set -eu
+              version=$(./sqlite3-linux-${{ matrix.arch }} --version)
+              printf "%s\n" "$version"
+              test -n "$version"
+              query=$(./sqlite3-linux-${{ matrix.arch }} ":memory:" "SELECT sqlite_version();")
+              printf "SQLite query result: %s\n" "$query"
+              test -n "$query"
+            '
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7.0.2
@@ -156,8 +168,8 @@ jobs:
 **（3）静态链接验证逻辑**
 使用 `file` 命令检查输出是否包含 “statically linked” 或 “static-pie linked”。不同 Alpine/GCC 版本可能默认生成普通静态 ELF 或静态 PIE；两者都不依赖动态系统库。若都未匹配，则 Workflow 失败，防止有问题的产物被上传。
 
-**（4）非 x86_64 架构的验证策略**
-GitHub 的 `ubuntu-latest` runner 是 x86_64，无法直接执行 32 位 x86 或 arm64 二进制。因此 smoke test 仅在 `x86_64` 上执行。x86 和 arm64 产物的正确性由编译成功 + `file` 静态链接检查来保证。如需运行级验证，可额外使用 QEMU 执行目标二进制，但会增加复杂度和时间。
+**（4）目标架构运行验证**
+每个构建任务都会在对应架构的 `alpine:latest` 容器中执行生成的二进制，检查 `--version` 输出并运行 `SELECT sqlite_version();` 查询。x86 和 arm64 使用前置配置的 QEMU/binfmt 模拟器执行；x86_64 在 runner 原生架构上运行。运行测试不依赖编译容器中的构建工具链，只使用目标 Alpine 用户空间。
 
 
 ## 5. 执行流程与产物获取
@@ -170,10 +182,10 @@ GitHub 的 `ubuntu-latest` runner 是 x86_64，无法直接执行 32 位 x86 或
 
 ### 5.2 并行执行
 
-三个矩阵任务同时运行：
-- `Build sqlite3 for x86_64`：在 `alpine:latest` 的 amd64 容器中编译。
-- `Build sqlite3 for x86`：QEMU 模拟下在 `alpine:latest` 的 386 容器中编译。
-- `Build sqlite3 for arm64`：QEMU 模拟下在 `alpine:latest` 的 arm64 容器中编译。
+三个矩阵任务同时运行，每个任务均在其目标架构的 `alpine:latest` 容器中编译并执行 smoke test：
+- `Build sqlite3 for x86_64`：在 amd64 容器中原生编译和运行。
+- `Build sqlite3 for x86`：通过 QEMU 在 386 容器中编译和运行。
+- `Build sqlite3 for arm64`：通过 QEMU 在 arm64 容器中编译和运行。
 
 ### 5.3 产物下载
 
@@ -187,10 +199,8 @@ Workflow 成功后，在 Actions 运行页面底部的 “Artifacts” 区域可
 
 | 检查项 | 方法 | 预期结果 |
 |---|---|---|
-| x86 为静态链接 | `file sqlite3-linux-x86` | 输出含 `statically linked` |
-| x86_64 为静态链接 | `file sqlite3-linux-x86_64` | 输出含 `statically linked` |
-| arm64 为静态链接 | `file sqlite3-linux-arm64` | 输出含 `statically linked` |
-| x86_64 可执行 | `./sqlite3-linux-x86_64 --version` | 打印 SQLite 版本号 |
+| 三种架构均为静态链接 | `file sqlite3-linux-*` | 输出含 `statically linked` 或 `static-pie linked` |
+| 三种架构均可执行 | 在对应的 Alpine 目标架构容器中运行 `--version` 和 SQLite 查询 | 打印 SQLite 版本，并输出 `sqlite_version()` 查询结果 |
 | 无 glibc 依赖 | `ldd sqlite3-linux-x86_64` | 输出 `not a dynamic executable` |
 | 跨环境运行 | 将 x86_64 产物拷贝到 CentOS 7 或 Debian 10 运行 | 正常执行，无 `.so` 缺失报错 |
 

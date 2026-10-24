@@ -67,9 +67,22 @@ jobs:
             exit 1
           fi
 
-      - name: Smoke test (x86_64 only)
-        if: matrix.arch == 'x86_64'
-        run: ./sqlite3-linux-x86_64 --version
+      - name: Smoke test in target Alpine
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/work" \
+            -w /work \
+            --platform ${{ matrix.platform }} \
+            alpine:latest \
+            sh -c '
+              set -eu
+              version=$(./sqlite3-linux-${{ matrix.arch }} --version)
+              printf "%s\n" "$version"
+              test -n "$version"
+              query=$(./sqlite3-linux-${{ matrix.arch }} ":memory:" "SELECT sqlite_version();")
+              printf "SQLite query result: %s\n" "$query"
+              test -n "$query"
+            '
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7.0.2
