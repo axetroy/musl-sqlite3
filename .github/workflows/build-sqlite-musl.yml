@@ -1,0 +1,84 @@
+name: Build Static SQLite3 (Alpine + musl)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build sqlite3 for ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            platform: linux/386
+            qemu-platform: 386
+          - arch: x86_64
+            platform: linux/amd64
+            qemu-platform: amd64
+          - arch: arm64
+            platform: linux/arm64
+            qemu-platform: arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Verify amalgamation sources
+        run: |
+          for source in shell.c sqlite3.c sqlite3.h; do
+            if [ ! -f "$source" ]; then
+              echo "::error::Required SQLite amalgamation source is missing: $source"
+              exit 1
+            fi
+          done
+
+      - name: Set up QEMU
+        if: matrix.arch != 'x86_64'
+        uses: docker/setup-qemu-action@v4.4.0
+        with:
+          platforms: ${{ matrix.qemu-platform }}
+
+      - name: Compile static sqlite3 inside Alpine
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/work" \
+            -w /work \
+            --platform ${{ matrix.platform }} \
+            alpine:latest \
+            sh -c '
+              set -e
+              apk add --no-cache build-base
+              gcc -Os -static \
+                -DSQLITE_ENABLE_FTS5 \
+                -DSQLITE_ENABLE_JSON1 \
+                -DSQLITE_ENABLE_RTREE \
+                shell.c sqlite3.c \
+                -o sqlite3-linux-${{ matrix.arch }} \
+                -lpthread -ldl -lm
+            '
+
+      - name: Verify static linkage
+        run: |
+          file sqlite3-linux-${{ matrix.arch }}
+          if file sqlite3-linux-${{ matrix.arch }} | grep -q "statically linked"; then
+            echo "Binary is statically linked"
+          else
+            echo "Binary is NOT statically linked"
+            exit 1
+          fi
+
+      - name: Smoke test (x86_64 only)
+        if: matrix.arch == 'x86_64'
+        run: ./sqlite3-linux-x86_64 --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: sqlite3-static-${{ matrix.arch }}
+          path: sqlite3-linux-${{ matrix.arch }}
+          if-no-files-found: error
