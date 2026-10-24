@@ -89,7 +89,7 @@ Linux 工作流在目标架构 Alpine 容器中完成编译、静态链接检查
 每个构建任务都会在对应架构的 `alpine:latest` 容器中执行生成的二进制，检查 `--version` 输出并运行 `SELECT sqlite_version();` 查询。x86 和 arm64 使用前置配置的 QEMU/binfmt 模拟器执行；x86_64 在 runner 原生架构上运行。运行测试不依赖编译容器中的构建工具链，只使用目标 Alpine 用户空间。
 
 **（5）macOS 和 Windows 依赖策略**
-- macOS 使用 Apple Clang 一次编译 `x86_64` 与 `arm64` 两个 universal2 slice，最低部署目标为 macOS 11；SQLite 源码直接编入 CLI，并通过 `lipo`、`otool -L` 检查架构与系统动态库依赖。macOS 的 `libSystem` 属于系统 API，不能像 musl ELF 一样完全静态链接。
+- macOS 使用 Apple Clang 一次编译 `x86_64` 与 `arm64` 两个 universal2 slice，最低部署目标为 macOS 11；SQLite 源码直接编入 CLI，并通过 `lipo`、逐 slice 的 `otool -arch <arch> -L` 检查架构与系统动态库依赖。macOS 的 `libSystem` 属于系统 API，不能像 musl ELF 一样完全静态链接。
 - Windows 使用 Visual Studio CMake 生成器构建 x86、x86_64 和 arm64，明确设定 `MSVC_RUNTIME_LIBRARY=MultiThreaded`（`/MT`），再用 `dumpbin` 检查架构和导入依赖，拒绝 MSVC/UCRT 动态运行库。x86/x86_64 在 Windows x64 runner 上运行，arm64 在 Windows ARM64 runner 上运行。Windows 内核及系统 DLL 仍由操作系统提供。
 - macOS 在 macOS runner 上运行版本和 SQL smoke test；macOS universal2 的两个架构 slice 都会检查存在，但 smoke test 执行于 runner 原生架构。
 

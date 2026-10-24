@@ -66,20 +66,22 @@ jobs:
             fi
           done
 
-          dependencies=$(otool -L sqlite3-macos-universal2 | tail -n +2 | awk '{print $1}')
-          if ! printf '%s\n' "$dependencies" | grep -qx '/usr/lib/libSystem.B.dylib'; then
-            echo "::error::Expected macOS system library libSystem.B.dylib"
-            exit 1
-          fi
-          if printf '%s\n' "$dependencies" | grep -Ev '^(/usr/lib/|/System/Library/)'; then
-            echo "::error::Binary has a non-system dynamic dependency"
-            exit 1
-          fi
-          if printf '%s\n' "$dependencies" | grep -qi 'libsqlite3'; then
-            echo "::error::SQLite must be compiled into the CLI, not dynamically linked"
-            exit 1
-          fi
-          printf 'Architectures: %s\nSystem dependencies:\n%s\n' "$architectures" "$dependencies"
+          for arch in x86_64 arm64; do
+            dependencies=$(otool -arch "$arch" -L sqlite3-macos-universal2 | tail -n +2 | awk '{print $1}')
+            printf 'Dependencies for %s:\n%s\n' "$arch" "$dependencies"
+            if ! printf '%s\n' "$dependencies" | grep -qx '/usr/lib/libSystem.B.dylib'; then
+              echo "::error::Expected macOS system library libSystem.B.dylib in ${arch} slice"
+              exit 1
+            fi
+            if printf '%s\n' "$dependencies" | grep -Ev '^(/usr/lib/|/System/Library/)'; then
+              echo "::error::The ${arch} slice has a non-system dynamic dependency"
+              exit 1
+            fi
+            if printf '%s\n' "$dependencies" | grep -qi 'libsqlite3'; then
+              echo "::error::SQLite must be compiled into the CLI, not dynamically linked"
+              exit 1
+            fi
+          done
 
       - name: Smoke test on macOS
         run: |
