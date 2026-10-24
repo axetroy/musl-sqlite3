@@ -20,7 +20,7 @@ on:
         default: ''
   push:
     paths:
-      - '.github/workflows/build-sqlite-musl.yml'
+      - '.github/workflows/build-sqlite-*.yml'
       - '.github/workflows/release-sqlite.yml'
       - 'scripts/**'
 

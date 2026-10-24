@@ -5,7 +5,7 @@ on:
     - cron: '17 2 * * 1'
   push:
     paths:
-      - '.github/workflows/build-sqlite-musl.yml'
+      - '.github/workflows/build-sqlite-*.yml'
       - '.github/workflows/release-sqlite.yml'
       - 'scripts/**'
   workflow_dispatch:
@@ -47,8 +47,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/check_sqlite_update.py
 
-  build:
-    name: Build and test SQLite ${{ needs.check.outputs.sqlite_version }}
+  build-linux:
+    name: Build Linux binaries for SQLite ${{ needs.check.outputs.sqlite_version }}
     needs: check
     if: >-
       needs.check.outputs.should_release == 'true' &&
@@ -60,11 +60,39 @@ jobs:
     permissions:
       contents: read
 
+  build-macos:
+    name: Build macOS binary for SQLite ${{ needs.check.outputs.sqlite_version }}
+    needs: check
+    if: >-
+      needs.check.outputs.should_release == 'true' &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))
+    uses: ./.github/workflows/build-sqlite-macos.yml
+    with:
+      sqlite_version: ${{ needs.check.outputs.sqlite_version }}
+    permissions:
+      contents: read
+
+  build-windows:
+    name: Build Windows binaries for SQLite ${{ needs.check.outputs.sqlite_version }}
+    needs: check
+    if: >-
+      needs.check.outputs.should_release == 'true' &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))
+    uses: ./.github/workflows/build-sqlite-windows.yml
+    with:
+      sqlite_version: ${{ needs.check.outputs.sqlite_version }}
+    permissions:
+      contents: read
+
   release:
     name: Publish GitHub Release
     needs:
       - check
-      - build
+      - build-linux
+      - build-macos
+      - build-windows
     if: >-
       needs.check.outputs.should_release == 'true' &&
       (github.event_name == 'schedule' ||
@@ -76,25 +104,32 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
 
-      - name: Download verified architecture artifacts
+      - name: Download verified platform artifacts
         uses: actions/download-artifact@v8.0.2
         with:
-          pattern: sqlite3-static-*
+          pattern: sqlite3-*
           path: release-assets
           merge-multiple: true
 
       - name: Verify assets and create checksums
         run: |
           set -euo pipefail
-          for arch in x86 x86_64 arm64; do
-            if [ ! -s "release-assets/sqlite3-linux-${arch}" ]; then
-              echo "::error::Missing or empty binary for ${arch}"
+          for binary in \
+            sqlite3-linux-x86 \
+            sqlite3-linux-x86_64 \
+            sqlite3-linux-arm64 \
+            sqlite3-macos-universal2 \
+            sqlite3-windows-x86.exe \
+            sqlite3-windows-x86_64.exe \
+            sqlite3-windows-arm64.exe; do
+            if [ ! -s "release-assets/${binary}" ]; then
+              echo "::error::Missing or empty binary: ${binary}"
               exit 1
             fi
           done
           (
             cd release-assets
-            sha256sum sqlite3-linux-* > SHA256SUMS
+            sha256sum sqlite3-* > SHA256SUMS
           )
 
       - name: Publish release
@@ -104,14 +139,18 @@ jobs:
           SQLITE_VERSION: ${{ needs.check.outputs.sqlite_version }}
         run: |
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
-          Static musl-linked SQLite CLI binaries for SQLite ${SQLITE_VERSION}.
+          Standalone SQLite CLI binaries for SQLite ${SQLITE_VERSION}.
 
-          Architectures: x86 (32-bit), x86_64, and arm64.
+          Linux: x86, x86_64, and arm64, statically linked with musl.
+          macOS: universal2 (x86_64 and arm64), with SQLite statically included;
+          depends only on macOS system libraries.
+          Windows: x86, x86_64, and arm64, with the MSVC runtime statically linked (/MT);
+          depends on Windows system DLLs.
 
-          Each binary was executed in its matching Alpine environment and passed
-          a SQLite version query. Verify downloaded files with \`SHA256SUMS\`.
+          Every binary passed a platform smoke test including a SQLite version
+          query. Verify downloaded files with \`SHA256SUMS\`.
           EOF
           gh release create "$RELEASE_TAG" release-assets/* \
-            --title "SQLite ${SQLITE_VERSION} static Linux binaries" \
+            --title "SQLite ${SQLITE_VERSION} standalone CLI binaries" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             --target "$GITHUB_SHA"

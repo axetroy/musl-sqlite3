@@ -1,0 +1,100 @@
+name: Build SQLite for macOS
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      sqlite_version:
+        description: SQLite version to build (blank means latest)
+        required: false
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      sqlite_version:
+        description: SQLite version to build (blank means latest)
+        required: false
+        type: string
+        default: ''
+  push:
+    paths:
+      - '.github/workflows/build-sqlite-*.yml'
+      - '.github/workflows/release-sqlite.yml'
+      - 'scripts/**'
+
+jobs:
+  build:
+    name: Build SQLite universal2
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Download SQLite amalgamation
+        env:
+          SQLITE_VERSION: ${{ inputs.sqlite_version }}
+        run: |
+          if [ -n "$SQLITE_VERSION" ]; then
+            python3 scripts/download_sqlite.py --version "$SQLITE_VERSION"
+          else
+            python3 scripts/download_sqlite.py
+          fi
+
+      - name: Compile SQLite CLI for universal2
+        run: |
+          xcrun clang \
+            -arch x86_64 \
+            -arch arm64 \
+            -mmacosx-version-min=11.0 \
+            -Os \
+            -DSQLITE_ENABLE_FTS5 \
+            -DSQLITE_ENABLE_JSON1 \
+            -DSQLITE_ENABLE_RTREE \
+            shell.c sqlite3.c \
+            -o sqlite3-macos-universal2
+
+      - name: Verify architectures and system dependencies
+        run: |
+          set -euo pipefail
+          architectures=$(lipo -archs sqlite3-macos-universal2)
+          for arch in x86_64 arm64; do
+            if ! printf '%s\n' "$architectures" | grep -qw "$arch"; then
+              echo "::error::Universal binary is missing architecture ${arch}"
+              exit 1
+            fi
+          done
+
+          dependencies=$(otool -L sqlite3-macos-universal2 | tail -n +2 | awk '{print $1}')
+          if ! printf '%s\n' "$dependencies" | grep -qx '/usr/lib/libSystem.B.dylib'; then
+            echo "::error::Expected macOS system library libSystem.B.dylib"
+            exit 1
+          fi
+          if printf '%s\n' "$dependencies" | grep -Ev '^(/usr/lib/|/System/Library/)'; then
+            echo "::error::Binary has a non-system dynamic dependency"
+            exit 1
+          fi
+          if printf '%s\n' "$dependencies" | grep -qi 'libsqlite3'; then
+            echo "::error::SQLite must be compiled into the CLI, not dynamically linked"
+            exit 1
+          fi
+          printf 'Architectures: %s\nSystem dependencies:\n%s\n' "$architectures" "$dependencies"
+
+      - name: Smoke test on macOS
+        run: |
+          set -euo pipefail
+          version=$(./sqlite3-macos-universal2 --version)
+          printf '%s\n' "$version"
+          test -n "$version"
+          sqlite_version=${version%% *}
+          query=$(./sqlite3-macos-universal2 ':memory:' 'SELECT sqlite_version();')
+          printf 'SQLite query result: %s\n' "$query"
+          test "$query" = "$sqlite_version"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: sqlite3-macos-universal2
+          path: sqlite3-macos-universal2
+          if-no-files-found: error
