@@ -11,7 +11,7 @@ SQLite 官方预编译二进制依赖较高版本的 glibc，在低版本 Linux 
 - `sqlite3-linux-x86_64`（x86_64 静态二进制）
 - `sqlite3-linux-arm64`（aarch64 静态二进制）
 
-三者均为 ELF 静态链接可执行文件，`file` 命令输出应显示 “statically linked”。
+三者均为 ELF 静态链接可执行文件，`file` 命令输出应显示 “statically linked” 或 “static-pie linked”。
 
 
 ## 2. 技术路线选择
@@ -28,13 +28,13 @@ SQLite 官方预编译二进制依赖较高版本的 glibc，在低版本 Linux 
 
 ### 3.1 CI 实时下载源码
 
-无需将 SQLite 源码提交到仓库。每次 CI 运行时，调用仓库中的 `scripts/download_sqlite.py`，从 SQLite 官方下载页解析最新发布的 `sqlite-amalgamation-*.zip`，并根据官方元数据校验文件大小和 SHA3-256 后，提取 `shell.c`、`sqlite3.c`、`sqlite3.h`。CI runner 需要可访问 `www.sqlite.org` 并提供 Python 3 标准库。
+无需将 SQLite 源码提交到仓库。每次 CI 运行时，调用仓库中的 `scripts/download_sqlite.py`，从 SQLite 官方下载页解析最新发布的 `sqlite-amalgamation-*.zip`，并根据官方元数据校验文件大小和 SHA3-256 后，提取 `shell.c`、`sqlite3.c`、`sqlite3.h`。脚本也支持按版本下载，供发布流程锁定检查到的版本。CI runner 需要可访问 `www.sqlite.org` 并提供 Python 3 标准库。
 
 官方 amalgamation 压缩包包含 CLI 和静态编译所需的上述三个文件。使用官方发布页而非固定版本号，可以在每次运行时构建当时最新的 SQLite 稳定发布版。
 
 ### 3.2 GitHub Actions 权限
 
-Workflow 需要能够使用 `actions/upload-artifact` 上传产物，默认权限即可满足。
+构建 Workflow 使用 `actions/upload-artifact` 保存验证产物，只需 `contents: read`。定时发布的检查任务也使用只读权限，只有最终发布 job 获得 `contents: write` 以创建 Release。
 
 
 ## 4. Workflow 文件设计
@@ -44,9 +44,10 @@ Workflow 需要能够使用 `actions/upload-artifact` 上传产物，默认权�
 文件路径：`.github/workflows/build-sqlite-musl.yml`
 
 触发条件：
-- `workflow_dispatch`（手动触发，便于调试）
-- `push` 修改 `.github/workflows/build-sqlite-musl.yml` 或 `scripts/**` 时自动构建。
-- 构建产物仅上传为 GitHub Actions Artifact，不创建 GitHub Release。
+- `workflow_dispatch`（可选指定 SQLite 版本，留空时构建最新版本）
+- `workflow_call`（由定时发布工作流调用并传入固定版本）
+- `push` 修改相关 Workflow 或 `scripts/**` 时自动构建。
+- 此工作流只上传 GitHub Actions Artifact；正式 Release 由 `.github/workflows/release-sqlite.yml` 发布。
 
 ### 4.2 完整 Workflow 内容
 
@@ -55,10 +56,27 @@ name: Build Static SQLite3 (Alpine + musl)
 
 on:
   workflow_dispatch:
+    inputs:
+      sqlite_version:
+        description: SQLite version to build (blank means latest)
+        required: false
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      sqlite_version:
+        description: SQLite version to build (blank means latest)
+        required: false
+        type: string
+        default: ''
   push:
     paths:
       - '.github/workflows/build-sqlite-musl.yml'
+      - '.github/workflows/release-sqlite.yml'
       - 'scripts/**'
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -82,8 +100,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
 
-      - name: Download latest SQLite amalgamation
-        run: python3 scripts/download_sqlite.py
+      - name: Download SQLite amalgamation
+        env:
+          SQLITE_VERSION: ${{ inputs.sqlite_version }}
+        run: |
+          if [ -n "$SQLITE_VERSION" ]; then
+            python3 scripts/download_sqlite.py --version "$SQLITE_VERSION"
+          else
+            python3 scripts/download_sqlite.py
+          fi
 
       # 仅 x86_64 可直接在 runner 上运行
       - name: Set up QEMU
@@ -117,9 +142,9 @@ jobs:
         run: |
           file sqlite3-linux-${{ matrix.arch }}
           if file sqlite3-linux-${{ matrix.arch }} | grep -Eq "statically linked|static-pie linked"; then
-            echo "✓ Binary is statically linked"
+            echo "Binary is statically linked"
           else
-            echo "✗ Binary is NOT statically linked"
+            echo "Binary is NOT statically linked"
             exit 1
           fi
 
@@ -149,12 +174,20 @@ jobs:
           if-no-files-found: error
 ```
 
-### 4.3 关键设计说明
+### 4.3 定时检查与 Release 发布
+
+发布工作流位于 `.github/workflows/release-sqlite.yml`，每周一 02:17 UTC 检查 SQLite 官方稳定版，并支持手动触发。相关 Workflow 或脚本变更的 push 也会运行只读版本检查，但不会发布。手动运行默认 `dry_run: true`，只检查并报告，不构建或发布；要手动发布时需显式关闭 dry run。
+
+检查脚本 `scripts/check_sqlite_update.py` 将官方最新版本与仓库中 `sqlite3-v<版本>` Release 比较。已有正式 Release 时结束；若发现草稿/预发布 Release，或同名 Git tag 已存在但没有 Release，则停止并要求人工处理，不自动覆盖。发现新版本时，将确切版本号传给可复用构建工作流。三种架构都完成编译、静态链接检查和目标环境运行测试后，发布工作流下载构建产物、生成 `SHA256SUMS`，并创建对应 GitHub Release。
+
+检查和构建 job 仅有 `contents: read` 权限；只有 Release job 持有 `contents: write`。发布并发通过 concurrency group 串行化。定时 Workflow 需合并到默认分支后才会按计划运行。
+
+### 4.4 关键设计说明
 
 **（1）基础镜像选择**
 - 所有架构统一使用官方多架构镜像 `alpine:latest`，并通过 `--platform` 选择 `linux/386`、`linux/amd64` 或 `linux/arm64`。
 - `apk add --no-cache build-base` 从对应 Alpine 版本的仓库安装当前可用版本的编译工具链。
-- Workflow 使用当前核对到的最新稳定版 Actions：`docker/setup-qemu-action@v4.4.0` 和 `actions/upload-artifact@v7.0.2`。SQLite amalgamation 在每次运行时从官方发布页动态发现、下载并校验。
+- Workflow 使用当前核对到的稳定版 Actions：`actions/checkout@v7.0.1`、`docker/setup-qemu-action@v4.4.0`、`actions/upload-artifact@v7.0.2` 和 `actions/download-artifact@v8.0.2`。SQLite amalgamation 在每次运行时从官方发布页动态发现、下载并校验。
 
 **（2）编译命令的取舍**
 - `shell.c sqlite3.c`：同时编译命令行入口和 SQLite 库。
@@ -176,9 +209,11 @@ jobs:
 
 ### 5.1 触发构建
 
-- 手动：在 GitHub 仓库 Actions 页面选择该 Workflow，点击 “Run workflow”。
-- 自动：push 修改 Workflow 文件或 `scripts/` 下 CI 脚本时触发。
-- 构建只上传临时 Actions Artifact，不发布 GitHub Release。
+- 验证构建：手动运行构建 Workflow，或 push 修改相关 Workflow/`scripts/` 时触发；只上传 Actions Artifact。
+- 发布检查：push 修改相关 Workflow/`scripts/` 时只检查版本，不发布。
+- 定时发布：每周一 02:17 UTC 检查新版本。发现未发布的稳定版后，构建并验证所有架构，再发布到 GitHub Release。
+- 手动发布：运行 `Check and Release SQLite`，默认 dry run；确认后关闭 dry run 才会创建 Release。
+- 定时运行只在默认分支生效；发布 tag 为 `sqlite3-v<SQLite版本>`。
 
 ### 5.2 并行执行
 
@@ -189,10 +224,12 @@ jobs:
 
 ### 5.3 产物下载
 
-Workflow 成功后，在 Actions 运行页面底部的 “Artifacts” 区域可下载：
+构建 Workflow 成功后，在 Actions 运行页面底部的 “Artifacts” 区域可下载临时验证产物：
 - `sqlite3-static-x86.zip`
 - `sqlite3-static-x86_64.zip`
 - `sqlite3-static-arm64.zip`
+
+定时发布成功后，同样的二进制及 `SHA256SUMS` 会作为附件出现在对应的 GitHub Release 中。
 
 
 ## 6. 验收标准
@@ -201,6 +238,9 @@ Workflow 成功后，在 Actions 运行页面底部的 “Artifacts” 区域可
 |---|---|---|
 | 三种架构均为静态链接 | `file sqlite3-linux-*` | 输出含 `statically linked` 或 `static-pie linked` |
 | 三种架构均可执行 | 在对应的 Alpine 目标架构容器中运行 `--version` 和 SQLite 查询 | 打印 SQLite 版本，并输出 `sqlite_version()` 查询结果 |
+| 已发布版本跳过重复构建 | 定时运行时检查对应的 `sqlite3-v<版本>` Release | 不重新编译、不重复发布 |
+| Release 发布前置条件 | 故意使一个架构的构建/运行测试失败 | 不创建 GitHub Release |
+| Release 校验文件 | 检查 Release 附件中的 `SHA256SUMS` | 覆盖三个架构的二进制文件 |
 | 无 glibc 依赖 | `ldd sqlite3-linux-x86_64` | 输出 `not a dynamic executable` |
 | 跨环境运行 | 将 x86_64 产物拷贝到 CentOS 7 或 Debian 10 运行 | 正常执行，无 `.so` 缺失报错 |
 

@@ -1,10 +1,27 @@
 name: Build Static SQLite3 (Alpine + musl)
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
+    inputs:
+      sqlite_version:
+        description: SQLite version to build (blank means latest)
+        required: false
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      sqlite_version:
+        description: SQLite version to build (blank means latest)
+        required: false
+        type: string
+        default: ''
   push:
     paths:
       - '.github/workflows/build-sqlite-musl.yml'
+      - '.github/workflows/release-sqlite.yml'
       - 'scripts/**'
 
 jobs:
@@ -29,8 +46,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
 
-      - name: Download latest SQLite amalgamation
-        run: python3 scripts/download_sqlite.py
+      - name: Download SQLite amalgamation
+        env:
+          SQLITE_VERSION: ${{ inputs.sqlite_version }}
+        run: |
+          if [ -n "$SQLITE_VERSION" ]; then
+            python3 scripts/download_sqlite.py --version "$SQLITE_VERSION"
+          else
+            python3 scripts/download_sqlite.py
+          fi
 
       - name: Set up QEMU
         if: matrix.arch != 'x86_64'

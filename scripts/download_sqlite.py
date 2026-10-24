@@ -1,3 +1,4 @@
+import argparse
 import csv
 import hashlib
 import io
@@ -11,7 +12,7 @@ DOWNLOAD_PAGE = "https://www.sqlite.org/download.html"
 REQUIRED_FILES = ("shell.c", "sqlite3.c", "sqlite3.h")
 
 
-def get_latest_amalgamation():
+def get_latest_amalgamation(version=None):
     request = urllib.request.Request(
         DOWNLOAD_PAGE,
         headers={"User-Agent": "sqlite-musl-build/1.0"},
@@ -38,6 +39,12 @@ def get_latest_amalgamation():
     if not releases:
         raise SystemExit("No SQLite amalgamation archive was listed")
 
+    if version is not None:
+        for release in releases:
+            if release["VERSION"] == version:
+                return release
+        raise SystemExit(f"SQLite amalgamation version {version} was not listed")
+
     return max(
         releases,
         key=lambda row: int(
@@ -47,7 +54,11 @@ def get_latest_amalgamation():
 
 
 def main():
-    release = get_latest_amalgamation()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--version", help="SQLite release version to download")
+    args = parser.parse_args()
+
+    release = get_latest_amalgamation(args.version)
     archive_url = "https://www.sqlite.org/" + release["RELATIVE-URL"]
     with urllib.request.urlopen(archive_url, timeout=60) as response:
         archive_data = response.read()
