@@ -18,35 +18,44 @@ on:
         required: false
         type: string
         default: ''
-  push:
-    paths:
-      - '.github/workflows/build-sqlite-*.yml'
-      - '.github/workflows/release-sqlite.yml'
-      - 'scripts/**'
+      source_artifact:
+        description: Verified SQLite source artifact from the caller workflow
+        required: false
+        type: string
+        default: ''
 
 jobs:
   build:
     name: Build and test - Linux/${{ matrix.arch }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x86
+            runner: ubuntu-latest
             platform: linux/386
-            qemu-platform: 386
           - arch: x86_64
+            runner: ubuntu-latest
             platform: linux/amd64
             qemu-platform: amd64
           - arch: arm64
+            runner: ubuntu-24.04-arm
             platform: linux/arm64
-            qemu-platform: arm64
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
 
+      - name: Download verified SQLite source artifact
+        if: inputs.source_artifact != ''
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: ${{ inputs.source_artifact }}
+          path: ${{ github.workspace }}
+
       - name: Download SQLite amalgamation
+        if: inputs.source_artifact == ''
         env:
           SQLITE_VERSION: ${{ inputs.sqlite_version }}
         run: |
@@ -57,10 +66,10 @@ jobs:
           fi
 
       - name: Set up QEMU
-        if: matrix.arch != 'x86_64'
+        if: matrix.arch == 'x86'
         uses: docker/setup-qemu-action@v4.4.0
         with:
-          platforms: ${{ matrix.qemu-platform }}
+          platforms: 386
 
       - name: Compile static sqlite3 inside Alpine
         run: |
@@ -103,9 +112,10 @@ jobs:
               version=$(./sqlite3-linux-${{ matrix.arch }} --version)
               printf "%s\n" "$version"
               test -n "$version"
+              sqlite_version=${version%% *}
               query=$(./sqlite3-linux-${{ matrix.arch }} ":memory:" "SELECT sqlite_version();")
               printf "SQLite query result: %s\n" "$query"
-              test -n "$query"
+              test "$query" = "$sqlite_version"
             '
 
       - name: Upload artifact

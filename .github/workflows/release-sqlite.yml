@@ -6,8 +6,10 @@ on:
   push:
     paths:
       - '.github/workflows/build-sqlite-*.yml'
+      - '.github/workflows/ci-sqlite.yml'
       - '.github/workflows/release-sqlite.yml'
       - 'scripts/**'
+      - 'tests/**'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -35,6 +37,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
 
+      - name: Test CI helper scripts
+        run: python3 -m unittest discover -s tests
+
       - name: Require default branch for manual publishing
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run == false && github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
         run: |
@@ -47,9 +52,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/check_sqlite_update.py
 
+  prepare-source:
+    name: Prepare verified SQLite source
+    needs: check
+    if: >-
+      needs.check.outputs.should_release == 'true' &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Download and verify pinned SQLite amalgamation
+        env:
+          SQLITE_VERSION: ${{ needs.check.outputs.sqlite_version }}
+        run: python3 scripts/download_sqlite.py --version "$SQLITE_VERSION"
+
+      - name: Upload verified SQLite source
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: sqlite-source
+          path: |
+            shell.c
+            sqlite3.c
+            sqlite3.h
+          if-no-files-found: error
+          retention-days: 7
+
   build-linux:
     name: Build and test - Linux artifacts (SQLite ${{ needs.check.outputs.sqlite_version }})
-    needs: check
+    needs:
+      - check
+      - prepare-source
     if: >-
       needs.check.outputs.should_release == 'true' &&
       (github.event_name == 'schedule' ||
@@ -57,12 +92,15 @@ jobs:
     uses: ./.github/workflows/build-sqlite-musl.yml
     with:
       sqlite_version: ${{ needs.check.outputs.sqlite_version }}
+      source_artifact: sqlite-source
     permissions:
       contents: read
 
   build-macos:
     name: Build and test - macOS artifacts (SQLite ${{ needs.check.outputs.sqlite_version }})
-    needs: check
+    needs:
+      - check
+      - prepare-source
     if: >-
       needs.check.outputs.should_release == 'true' &&
       (github.event_name == 'schedule' ||
@@ -70,12 +108,15 @@ jobs:
     uses: ./.github/workflows/build-sqlite-macos.yml
     with:
       sqlite_version: ${{ needs.check.outputs.sqlite_version }}
+      source_artifact: sqlite-source
     permissions:
       contents: read
 
   build-windows:
     name: Build and test - Windows artifacts (SQLite ${{ needs.check.outputs.sqlite_version }})
-    needs: check
+    needs:
+      - check
+      - prepare-source
     if: >-
       needs.check.outputs.should_release == 'true' &&
       (github.event_name == 'schedule' ||
@@ -83,6 +124,7 @@ jobs:
     uses: ./.github/workflows/build-sqlite-windows.yml
     with:
       sqlite_version: ${{ needs.check.outputs.sqlite_version }}
+      source_artifact: sqlite-source
     permissions:
       contents: read
 
@@ -129,7 +171,15 @@ jobs:
           done
           (
             cd release-assets
-            sha256sum sqlite3-* > SHA256SUMS
+            sha256sum \
+              sqlite3-linux-x86 \
+              sqlite3-linux-x86_64 \
+              sqlite3-linux-arm64 \
+              sqlite3-macos-universal2 \
+              sqlite3-windows-x86.exe \
+              sqlite3-windows-x86_64.exe \
+              sqlite3-windows-arm64.exe \
+              > SHA256SUMS
           )
 
       - name: Publish release

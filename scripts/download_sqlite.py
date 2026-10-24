@@ -2,10 +2,13 @@ import argparse
 import csv
 import hashlib
 import io
+import os
 import re
 import shutil
 import urllib.request
 import zipfile
+
+from http_utils import urlopen_with_retry
 
 
 DOWNLOAD_PAGE = "https://www.sqlite.org/download.html"
@@ -17,7 +20,7 @@ def get_latest_amalgamation(version=None):
         DOWNLOAD_PAGE,
         headers={"User-Agent": "sqlite-musl-build/1.0"},
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urlopen_with_retry(request, timeout=30) as response:
         page = response.read().decode("utf-8")
 
     metadata = re.search(
@@ -60,7 +63,7 @@ def main():
 
     release = get_latest_amalgamation(args.version)
     archive_url = "https://www.sqlite.org/" + release["RELATIVE-URL"]
-    with urllib.request.urlopen(archive_url, timeout=60) as response:
+    with urlopen_with_retry(archive_url, timeout=60) as response:
         archive_data = response.read()
 
     if len(archive_data) != int(release["SIZE-IN-BYTES"]):
@@ -81,6 +84,10 @@ def main():
                 shutil.copyfileobj(source, target)
 
     print(f"Downloaded and verified SQLite {release['VERSION']} ({archive_name})")
+    output_file = os.environ.get("GITHUB_OUTPUT")
+    if output_file:
+        with open(output_file, "a", encoding="utf-8") as output:
+            output.write(f"sqlite_version={release['VERSION']}\n")
 
 
 if __name__ == "__main__":

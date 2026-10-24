@@ -2,9 +2,10 @@ import json
 import os
 from urllib.error import HTTPError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from download_sqlite import get_latest_amalgamation
+from http_utils import urlopen_with_retry
 
 
 GITHUB_API = "https://api.github.com"
@@ -21,7 +22,7 @@ def github_get(path):
 
     request = Request(f"{GITHUB_API}{path}", headers=headers)
     try:
-        with urlopen(request, timeout=30) as response:
+        with urlopen_with_retry(request, timeout=30) as response:
             return json.load(response)
     except HTTPError as error:
         if error.code == 404:

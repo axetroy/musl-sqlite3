@@ -18,11 +18,11 @@ on:
         required: false
         type: string
         default: ''
-  push:
-    paths:
-      - '.github/workflows/build-sqlite-*.yml'
-      - '.github/workflows/release-sqlite.yml'
-      - 'scripts/**'
+      source_artifact:
+        description: Verified SQLite source artifact from the caller workflow
+        required: false
+        type: string
+        default: ''
 
 jobs:
   build:
@@ -49,7 +49,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
 
+      - name: Download verified SQLite source artifact
+        if: inputs.source_artifact != ''
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: ${{ inputs.source_artifact }}
+          path: ${{ github.workspace }}
+
       - name: Download SQLite amalgamation
+        if: inputs.source_artifact == ''
         env:
           SQLITE_VERSION: ${{ inputs.sqlite_version }}
         run: |
@@ -140,7 +148,6 @@ jobs:
       - name: Smoke test on Windows
         env:
           SQLITE_ARCH: ${{ matrix.arch }}
-          SQLITE_VERSION: ${{ inputs.sqlite_version }}
         run: |
           $binary = ".\sqlite3-windows-$env:SQLITE_ARCH.exe"
           $version = & $binary --version
