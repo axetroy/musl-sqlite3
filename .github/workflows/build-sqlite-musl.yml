@@ -1,4 +1,4 @@
-name: Build Static SQLite3 (Alpine + musl)
+name: SQLite CI - Linux (musl)
 
 permissions:
   contents: read
@@ -26,7 +26,7 @@ on:
 
 jobs:
   build:
-    name: Build sqlite3 for ${{ matrix.arch }}
+    name: Build and test - Linux/${{ matrix.arch }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

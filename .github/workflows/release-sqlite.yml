@@ -1,4 +1,4 @@
-name: Check and Release SQLite
+name: SQLite Release
 
 on:
   schedule:
@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   check:
-    name: Check for a new SQLite version
+    name: Check - SQLite version
     runs-on: ubuntu-latest
     outputs:
       sqlite_version: ${{ steps.check.outputs.sqlite_version }}
@@ -48,7 +48,7 @@ jobs:
         run: python3 scripts/check_sqlite_update.py
 
   build-linux:
-    name: Build Linux binaries for SQLite ${{ needs.check.outputs.sqlite_version }}
+    name: Build and test - Linux artifacts (SQLite ${{ needs.check.outputs.sqlite_version }})
     needs: check
     if: >-
       needs.check.outputs.should_release == 'true' &&
@@ -61,7 +61,7 @@ jobs:
       contents: read
 
   build-macos:
-    name: Build macOS binary for SQLite ${{ needs.check.outputs.sqlite_version }}
+    name: Build and test - macOS artifacts (SQLite ${{ needs.check.outputs.sqlite_version }})
     needs: check
     if: >-
       needs.check.outputs.should_release == 'true' &&
@@ -74,7 +74,7 @@ jobs:
       contents: read
 
   build-windows:
-    name: Build Windows binaries for SQLite ${{ needs.check.outputs.sqlite_version }}
+    name: Build and test - Windows artifacts (SQLite ${{ needs.check.outputs.sqlite_version }})
     needs: check
     if: >-
       needs.check.outputs.should_release == 'true' &&
@@ -87,7 +87,7 @@ jobs:
       contents: read
 
   release:
-    name: Publish GitHub Release
+    name: Publish - GitHub Release
     needs:
       - check
       - build-linux

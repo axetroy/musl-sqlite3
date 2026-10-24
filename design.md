@@ -101,15 +101,15 @@ Linux 工作流在目标架构 Alpine 容器中完成编译、静态链接检查
 - 验证构建：手动运行构建 Workflow，或 push 修改相关 Workflow/`scripts/` 时触发；只上传 Actions Artifact。
 - 发布检查：push 修改相关 Workflow/`scripts/` 时只检查版本，不发布。
 - 定时发布：每周一 02:17 UTC 检查新版本。发现未发布的稳定版后，构建并验证所有架构，再发布到 GitHub Release。
-- 手动发布：运行 `Check and Release SQLite`，默认 dry run；确认后关闭 dry run 才会创建 Release。
+- 手动发布：运行 `SQLite Release`，默认 dry run；确认后关闭 dry run 才会创建 Release。
 - 定时运行只在默认分支生效；发布 tag 为 `sqlite3-v<SQLite版本>`。
 
 ### 5.2 并行执行
 
 Linux 的三个矩阵任务同时运行，每个任务均在其目标架构的 `alpine:latest` 容器中编译并执行 smoke test：
-- `Build sqlite3 for x86_64`：在 amd64 容器中原生编译和运行。
-- `Build sqlite3 for x86`：通过 QEMU 在 386 容器中编译和运行。
-- `Build sqlite3 for arm64`：通过 QEMU 在 arm64 容器中编译和运行。
+- `Build and test - Linux/x86_64`：在 amd64 容器中原生编译和运行。
+- `Build and test - Linux/x86`：通过 QEMU 在 386 容器中编译和运行。
+- `Build and test - Linux/arm64`：通过 QEMU 在 arm64 容器中编译和运行。
 
 此外，macOS 工作流生成并验证 universal2 二进制；Windows 工作流分别在 x86/x86_64 和 arm64 目标环境中生成、检查并运行二进制。定时发布的三个工作流并行运行，任一失败都阻止 Release 创建。
 

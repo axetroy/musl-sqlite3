@@ -1,4 +1,4 @@
-name: Build SQLite for Windows
+name: SQLite CI - Windows
 
 permissions:
   contents: read
@@ -26,7 +26,7 @@ on:
 
 jobs:
   build:
-    name: Build SQLite for ${{ matrix.arch }}
+    name: Build and test - Windows/${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

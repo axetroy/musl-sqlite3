@@ -1,4 +1,4 @@
-name: Build SQLite for macOS
+name: SQLite CI - macOS
 
 permissions:
   contents: read
@@ -26,7 +26,7 @@ on:
 
 jobs:
   build:
-    name: Build SQLite universal2
+    name: Build and test - macOS/universal2
     runs-on: macos-latest
     steps:
       - name: Checkout repository
