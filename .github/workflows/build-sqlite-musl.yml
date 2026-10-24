@@ -60,7 +60,7 @@ jobs:
       - name: Verify static linkage
         run: |
           file sqlite3-linux-${{ matrix.arch }}
-          if file sqlite3-linux-${{ matrix.arch }} | grep -q "statically linked"; then
+          if file sqlite3-linux-${{ matrix.arch }} | grep -Eq "statically linked|static-pie linked"; then
             echo "Binary is statically linked"
           else
             echo "Binary is NOT statically linked"

@@ -116,7 +116,7 @@ jobs:
       - name: Verify static linkage
         run: |
           file sqlite3-linux-${{ matrix.arch }}
-          if file sqlite3-linux-${{ matrix.arch }} | grep -q "statically linked"; then
+          if file sqlite3-linux-${{ matrix.arch }} | grep -Eq "statically linked|static-pie linked"; then
             echo "✓ Binary is statically linked"
           else
             echo "✗ Binary is NOT statically linked"
@@ -154,7 +154,7 @@ jobs:
 - `-lpthread -ldl -lm`：SQLite 所需的线程、动态加载、数学库。静态链接时这些库的静态版本由 musl 提供。
 
 **（3）静态链接验证逻辑**
-使用 `file` 命令检查输出是否包含 “statically linked”。若不含，则 Workflow 失败，防止有问题的产物被上传。
+使用 `file` 命令检查输出是否包含 “statically linked” 或 “static-pie linked”。不同 Alpine/GCC 版本可能默认生成普通静态 ELF 或静态 PIE；两者都不依赖动态系统库。若都未匹配，则 Workflow 失败，防止有问题的产物被上传。
 
 **（4）非 x86_64 架构的验证策略**
 GitHub 的 `ubuntu-latest` runner 是 x86_64，无法直接执行 32 位 x86 或 arm64 二进制。因此 smoke test 仅在 `x86_64` 上执行。x86 和 arm64 产物的正确性由编译成功 + `file` 静态链接检查来保证。如需运行级验证，可额外使用 QEMU 执行目标二进制，但会增加复杂度和时间。
