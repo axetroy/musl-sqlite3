@@ -1,0 +1,161 @@
+name: SQLite CI - macOS
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      sqlite_version:
+        description: SQLite version to build (blank means latest)
+        required: false
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      sqlite_version:
+        description: SQLite version to build (blank means latest)
+        required: false
+        type: string
+        default: ''
+      source_artifact:
+        description: Verified SQLite source artifact from the caller workflow
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  build:
+    name: Build and test - macOS/${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: macos-15-intel
+          - arch: arm64
+            runner: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Download verified SQLite source artifact
+        if: inputs.source_artifact != ''
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: ${{ inputs.source_artifact }}
+          path: ${{ github.workspace }}
+
+      - name: Download SQLite amalgamation
+        if: inputs.source_artifact == ''
+        env:
+          SQLITE_VERSION: ${{ inputs.sqlite_version }}
+        run: |
+          if [ -n "$SQLITE_VERSION" ]; then
+            python3 scripts/download_sqlite.py --version "$SQLITE_VERSION"
+          else
+            python3 scripts/download_sqlite.py
+          fi
+
+      - name: Compile SQLite CLI for target architecture
+        env:
+          SQLITE_ARCH: ${{ matrix.arch }}
+        run: |
+          xcrun clang \
+            -arch "$SQLITE_ARCH" \
+            -mmacosx-version-min=11.0 \
+            -Os \
+            -DSQLITE_ENABLE_FTS5 \
+            -DSQLITE_ENABLE_JSON1 \
+            -DSQLITE_ENABLE_RTREE \
+            shell.c sqlite3.c \
+            -o "sqlite3-macos-${SQLITE_ARCH}"
+
+      - name: Verify architecture and system dependencies
+        env:
+          SQLITE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          binary="sqlite3-macos-${SQLITE_ARCH}"
+          architectures=$(lipo -archs "$binary")
+          if ! printf '%s\n' "$architectures" | grep -qw "$SQLITE_ARCH"; then
+            echo "::error::Binary is missing architecture ${SQLITE_ARCH}"
+            exit 1
+          fi
+
+          dependencies=$(otool -arch "$SQLITE_ARCH" -L "$binary" | tail -n +2 | awk '{print $1}')
+          printf 'Dependencies for %s:\n%s\n' "$SQLITE_ARCH" "$dependencies"
+          if ! printf '%s\n' "$dependencies" | grep -qx '/usr/lib/libSystem.B.dylib'; then
+            echo "::error::Expected macOS system library libSystem.B.dylib in ${SQLITE_ARCH}"
+            exit 1
+          fi
+          if printf '%s\n' "$dependencies" | grep -Ev '^(/usr/lib/|/System/Library/)'; then
+            echo "::error::The ${SQLITE_ARCH} binary has a non-system dynamic dependency"
+            exit 1
+          fi
+          if printf '%s\n' "$dependencies" | grep -qi 'libsqlite3'; then
+            echo "::error::SQLite must be compiled into the CLI, not dynamically linked"
+            exit 1
+          fi
+
+      - name: Smoke test on macOS
+        env:
+          SQLITE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          binary="./sqlite3-macos-${SQLITE_ARCH}"
+          version=$("$binary" --version)
+          printf '%s\n' "$version"
+          test -n "$version"
+          sqlite_version=${version%% *}
+          query=$("$binary" ':memory:' 'SELECT sqlite_version();')
+          printf 'SQLite query result: %s\n' "$query"
+          test "$query" = "$sqlite_version"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: macos-slice-${{ matrix.arch }}
+          path: sqlite3-macos-${{ matrix.arch }}
+          if-no-files-found: error
+
+  assemble:
+    name: Assemble and test - macOS/universal2
+    needs: build
+    runs-on: macos-15
+    steps:
+      - name: Download native architecture binaries
+        uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: macos-slice-*
+          path: slices
+          merge-multiple: true
+
+      - name: Assemble and verify universal2 binary
+        run: |
+          set -euo pipefail
+          lipo -create \
+            slices/sqlite3-macos-x86_64 \
+            slices/sqlite3-macos-arm64 \
+            -output sqlite3-macos-universal2
+          chmod +x sqlite3-macos-universal2
+          architectures=$(lipo -archs sqlite3-macos-universal2)
+          for arch in x86_64 arm64; do
+            if ! printf '%s\n' "$architectures" | grep -qw "$arch"; then
+              echo "::error::Universal binary is missing architecture ${arch}"
+              exit 1
+            fi
+          done
+          version=$(./sqlite3-macos-universal2 --version)
+          printf '%s\n' "$version"
+          query=$(./sqlite3-macos-universal2 ':memory:' 'SELECT sqlite_version();')
+          printf 'SQLite query result: %s\n' "$query"
+          test "$query" = "${version%% *}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: sqlite3-macos-universal2
+          path: sqlite3-macos-universal2
+          if-no-files-found: error

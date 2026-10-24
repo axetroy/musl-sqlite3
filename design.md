@@ -1,141 +1,75 @@
-# 技术方案：GitHub Actions 多架构 Alpine + musl 静态编译 SQLite3
+# 技术方案：GitHub Actions 跨平台 SQLite3 构建与发布
 
 ## 1. 背景与目标
 
 SQLite 官方预编译二进制依赖较高版本的 glibc，在低版本 Linux 环境（如 CentOS 7、旧版 Debian）中无法直接运行。在 glibc 环境下做“伪静态”编译并不可靠，部分符号仍可能动态依赖 NSS 等库。
 
-**目标**：通过 GitHub Actions，在 Alpine Linux（musl libc）环境中为 `amd64` 和 `arm64` 架构分别编译出**完全静态链接**的 SQLite3 命令行工具，产物可在任意 Linux 发行版上直接运行，不依赖目标系统的 glibc 或 musl 版本。
+**目标**：通过 GitHub Actions 编译并发布 Linux、macOS 和 Windows SQLite 命令行工具。Linux 使用 Alpine/musl 完全静态链接，覆盖 `x86`、`x86_64` 和 `arm64`；macOS 发布包含 `x86_64` 与 `arm64` 的 universal2 二进制；Windows 发布 x86、x86_64 和 arm64 二进制，并静态链接 MSVC 运行库。
 
 **预期产物**：
-- `sqlite3-linux-amd64`（x86_64 静态二进制）
+- `sqlite3-linux-x86`（i386 静态二进制）
+- `sqlite3-linux-x86_64`（x86_64 静态二进制）
 - `sqlite3-linux-arm64`（aarch64 静态二进制）
+- `sqlite3-macos-universal2`（包含 x86_64 和 arm64；依赖 macOS 系统库）
+- `sqlite3-windows-x86.exe`、`sqlite3-windows-x86_64.exe`、`sqlite3-windows-arm64.exe`（静态链接 MSVC 运行库）
 
-两者均为 ELF 静态链接可执行文件，`file` 命令输出应显示 “statically linked”。
+Linux 三者均为 ELF 静态链接可执行文件，`file` 命令输出应显示 “statically linked” 或 “static-pie linked”。macOS 和 Windows 的系统 API/系统 DLL 仍由操作系统提供，因此不宣称跨平台的字面意义“零系统依赖”。
 
 
 ## 2. 技术路线选择
 
-采用 **QEMU 模拟 + 目标架构 Alpine 容器内原生编译** 的方式，而非配置交叉编译工具链。
+采用 **目标架构原生 runner + Alpine 容器**，并仅对 Linux x86 使用 QEMU 模拟。
 
 理由：
-- 交叉编译 musl 工具链（如 `aarch64-linux-musl-gcc`）配置复杂，容易出现链接错误。
-- 在 QEMU 模拟的目标架构 Alpine 容器中，直接使用该架构的原生 `gcc`（即 musl-gcc），编译过程与在真实 arm64 机器上一致，成功率更高。
-- GitHub Actions 社区已有成熟模式：使用 `docker/setup-qemu-action` 启用模拟，再通过 `docker run` 运行目标架构的 Alpine 镜像。
+- Linux x86_64 和 arm64 使用原生 runner；Windows 三种架构及 macOS x86_64/arm64 slice 也分别在对应架构 runner 上构建和执行。
+- Linux x86 暂用 `docker/setup-qemu-action`，避免单独维护 musl 交叉编译工具链。
 
 
 ## 3. 前置条件
 
-### 3.1 仓库文件要求
+### 3.1 CI 实时下载源码
 
-仓库根目录（或指定路径）下需包含 SQLite amalgamation 源码包中的以下文件：
-- `sqlite3.c`
-- `sqlite3.h`
-- `shell.c`
+无需将 SQLite 源码提交到仓库。CI 编排工作流调用 `scripts/download_sqlite.py` 一次，从 SQLite 官方下载页解析最新发布的 `sqlite-amalgamation-*.zip`，并根据官方元数据校验文件大小和 SHA3-256 后，将 `shell.c`、`sqlite3.c`、`sqlite3.h` 上传为短期 artifact，供全部平台构建复用。发布工作流同样只下载一次检查到的固定版本源码。脚本对暂时性网络错误进行有限退避重试。CI runner 需要可访问 `www.sqlite.org` 并提供 Python 3 标准库。
 
-**说明**：SQLite 官方推荐使用 amalgamation（合并源码）进行编译，因为所有代码生成和转换步骤已完成，编译最简单，且编译器能进行更激进的优化（性能提升 5%~10%）。从 SQLite 官网下载 `sqlite-amalgamation-*.zip` 解压即可获得上述三个文件。
+官方 amalgamation 压缩包包含 CLI 和静态编译所需的上述三个文件。使用官方发布页而非固定版本号，可以在每次运行时构建当时最新的 SQLite 稳定发布版。
 
 ### 3.2 GitHub Actions 权限
 
-Workflow 需要能够使用 `actions/upload-artifact` 上传产物，默认权限即可满足。
+构建 Workflow 使用 `actions/upload-artifact` 保存验证产物，只需 `contents: read`。定时发布的检查任务也使用只读权限，只有最终发布 job 获得 `contents: write` 以创建 Release。
 
 
 ## 4. Workflow 文件设计
 
 ### 4.1 文件路径与触发条件
 
-文件路径：`.github/workflows/build-sqlite-musl.yml`
+CI 编排工作流为 `.github/workflows/ci-sqlite.yml`；平台构建工作流：
+- `.github/workflows/build-sqlite-musl.yml`：Linux x86、x86_64、arm64。
+- `.github/workflows/build-sqlite-macos.yml`：分别原生构建并测试 macOS x86_64 与 arm64，再组合成 universal2。
+- `.github/workflows/build-sqlite-windows.yml`：Windows x86、x86_64、arm64。
 
 触发条件：
-- `workflow_dispatch`（手动触发，便于调试）
-- `push` 到 tags（如 `v*`，用于版本发布时自动构建）
+- `.github/workflows/ci-sqlite.yml` 在修改 SQLite 构建/发布 workflow、`scripts/**` 或 `tests/**` 时统一触发；一次解析、下载并校验源码，再调用所有平台构建并上传验证 artifact，不创建 Release。
+- CI 编排工作流支持 `workflow_dispatch`，可指定 SQLite 版本；各平台工作流保留独立手动运行和 `workflow_call` 能力。
+- 正式 Release 由 `.github/workflows/release-sqlite.yml` 发布，构建时会传入已检查的固定 SQLite 版本。
 
-### 4.2 完整 Workflow 内容
+### 4.2 Linux 构建 Workflow
 
-```yaml
-name: Build Static SQLite3 (Alpine + musl)
+Linux 工作流在目标架构 Alpine 容器中完成编译、静态链接检查及运行测试；x86_64 和 arm64 使用原生 runner，x86 使用 QEMU。完整配置见 `.github/workflows/build-sqlite-musl.yml`。Windows 的 CMake 配置位于 `scripts/windows/CMakeLists.txt`。
 
-on:
-  workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
+### 4.3 定时检查与 Release 发布
 
-jobs:
-  build:
-    name: Build sqlite3 for ${{ matrix.arch }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            platform: linux/amd64
-            image: alpine:3.20
-          - arch: arm64
-            platform: linux/arm64
-            image: arm64v8/alpine:3.20
+发布工作流位于 `.github/workflows/release-sqlite.yml`，每周一 02:17 UTC 检查 SQLite 官方稳定版，并支持手动触发。相关 Workflow 或脚本变更的 push 也会运行只读版本检查，但不会发布。手动运行默认 `dry_run: true`，只检查并报告，不构建或发布；要手动发布时需显式关闭 dry run。
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+检查脚本 `scripts/check_sqlite_update.py` 将官方最新版本与仓库中 `sqlite3-v<版本>` Release 比较。已有正式 Release 时结束；若发现草稿/预发布 Release，或同名 Git tag 已存在但没有 Release，则停止并要求人工处理，不自动覆盖。发现新版本时，发布工作流先下载并校验一次确切版本的源码 artifact，再将其交给三个可复用构建工作流。Linux、macOS、Windows 所有目标都完成构建、依赖检查和运行测试后，发布工作流才会下载全部构建产物、生成 `SHA256SUMS` 并创建对应 GitHub Release。
 
-      # 仅非 amd64 架构需要 QEMU 模拟
-      - name: Set up QEMU
-        if: matrix.arch != 'amd64'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: ${{ matrix.platform }}
+检查和构建 job 仅有 `contents: read` 权限；只有 Release job 持有 `contents: write`。发布并发通过 concurrency group 串行化。定时 Workflow 需合并到默认分支后才会按计划运行。
 
-      # 在目标架构的 Alpine 容器中编译
-      - name: Compile static sqlite3 inside Alpine
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/work" \
-            -w /work \
-            --platform ${{ matrix.platform }} \
-            ${{ matrix.image }} \
-            sh -c '
-              set -e
-              apk add --no-cache build-base
-              gcc -Os -static \
-                -DSQLITE_ENABLE_FTS5 \
-                -DSQLITE_ENABLE_JSON1 \
-                -DSQLITE_ENABLE_RTREE \
-                shell.c sqlite3.c \
-                -o sqlite3-linux-${{ matrix.arch }} \
-                -lpthread -ldl -lm
-            '
-
-      # 验证产物确实是静态链接
-      - name: Verify static linkage
-        run: |
-          file sqlite3-linux-${{ matrix.arch }}
-          if file sqlite3-linux-${{ matrix.arch }} | grep -q "statically linked"; then
-            echo "✓ Binary is statically linked"
-          else
-            echo "✗ Binary is NOT statically linked"
-            exit 1
-          fi
-
-      # 对于 amd64，可直接在 runner 上运行版本检查
-      - name: Smoke test (amd64 only)
-        if: matrix.arch == 'amd64'
-        run: |
-          ./sqlite3-linux-amd64 --version
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sqlite3-static-${{ matrix.arch }}
-          path: sqlite3-linux-${{ matrix.arch }}
-          if-no-files-found: error
-```
-
-### 4.3 关键设计说明
+### 4.4 关键设计说明
 
 **（1）基础镜像选择**
-- `amd64` 使用 `alpine:3.20`（官方多架构镜像的 amd64 变体）。
-- `arm64` 使用 `arm64v8/alpine:3.20`（Alpine 官方为 arm64 提供的镜像名）。也可统一使用 `alpine:3.20` 并配合 `--platform` 参数，Docker 会自动拉取对应架构的 manifest。
+- Alpine 构建统一使用官方多架构镜像 `alpine:latest`，并通过 `--platform` 选择 `linux/386`、`linux/amd64` 或 `linux/arm64`。
+- `apk add --no-cache build-base` 从对应 Alpine 版本的仓库安装当前可用版本的编译工具链。
+- Workflow 使用当前核对到的稳定版 Actions：`actions/checkout@v7.0.1`、`docker/setup-qemu-action@v4.4.0`、`actions/upload-artifact@v7.0.2` 和 `actions/download-artifact@v8.0.2`。每次编排运行只解析、下载和校验一次 SQLite amalgamation。
 
 **（2）编译命令的取舍**
 - `shell.c sqlite3.c`：同时编译命令行入口和 SQLite 库。
@@ -147,56 +81,90 @@ jobs:
 - `-lpthread -ldl -lm`：SQLite 所需的线程、动态加载、数学库。静态链接时这些库的静态版本由 musl 提供。
 
 **（3）静态链接验证逻辑**
-使用 `file` 命令检查输出是否包含 “statically linked”。若不含，则 Workflow 失败，防止有问题的产物被上传。
+使用 `file` 命令检查输出是否包含 “statically linked” 或 “static-pie linked”。不同 Alpine/GCC 版本可能默认生成普通静态 ELF 或静态 PIE；两者都不依赖动态系统库。若都未匹配，则 Workflow 失败，防止有问题的产物被上传。
 
-**（4）arm64 的验证策略**
-GitHub 的 `ubuntu-latest` runner 是 x86_64，无法直接执行 arm64 二进制。因此 smoke test 仅在 `amd64` 上执行。arm64 产物的正确性由编译成功 + `file` 静态链接检查来保证。如需运行级验证，可额外使用 QEMU 执行 `./sqlite3-linux-arm64 --version`，但会增加复杂度和时间。
+**（4）目标架构运行验证**
+每个 Linux 构建任务都会在对应架构的 `alpine:latest` 容器中执行生成的二进制，检查 `--version` 与 `SELECT sqlite_version();` 的版本一致。x86 使用 QEMU/binfmt；x86_64 和 arm64 在原生 runner 上运行。Windows 每种架构都在对应 runner 上执行；macOS x86_64 与 arm64 slice 分别在原生 runner 上测试，最后再组合成 universal2。
+
+**（5）macOS 和 Windows 依赖策略**
+- macOS 使用 Apple Clang 分别编译 `x86_64` 与 `arm64` slice，最低部署目标为 macOS 11；SQLite 源码直接编入 CLI，并通过 `lipo`、逐 slice 的 `otool -arch <arch> -L` 检查架构与系统动态库依赖。macOS 的 `libSystem` 属于系统 API，不能像 musl ELF 一样完全静态链接。
+- Windows 使用 Visual Studio CMake 生成器构建 x86、x86_64 和 arm64，明确设定 `MSVC_RUNTIME_LIBRARY=MultiThreaded`（`/MT`），再用 `dumpbin` 检查架构和导入依赖，拒绝 MSVC/UCRT 动态运行库。x86/x86_64 在 Windows x64 runner 上运行，arm64 在 Windows ARM64 runner 上运行。Windows 内核及系统 DLL 仍由操作系统提供。
+
+**（6）CI 触发与重试策略**
+- 任一相关 CI workflow、脚本或测试改动仍会运行全平台 artifact 构建，以保留完整回归覆盖；统一编排避免为三个平台各自启动独立的推送工作流。
+- SQLite 官方下载及 GitHub API 请求对网络错误、HTTP 408/429/5xx 最多尝试三次，并使用短退避；非暂时性 HTTP 错误直接失败。
 
 
 ## 5. 执行流程与产物获取
 
 ### 5.1 触发构建
 
-- 手动：在 GitHub 仓库 Actions 页面选择该 Workflow，点击 “Run workflow”。
-- 自动：推送 tag（如 `git tag v1.0.0 && git push origin v1.0.0`）。
+- 验证构建：手动运行 `SQLite CI`，或 push 修改相关 Workflow、`scripts/`、`tests/` 时触发；统一使用一次校验后的源码，上传平台 Actions Artifact，不发布 Release。
+- 发布检查：push 修改相关 Workflow/`scripts/` 时只检查版本，不发布。
+- 定时发布：每周一 02:17 UTC 检查新版本。发现未发布的稳定版后，构建并验证所有架构，再发布到 GitHub Release。
+- 手动发布：运行 `SQLite Release`，默认 dry run；确认后关闭 dry run 才会创建 Release。
+- 定时运行只在默认分支生效；发布 tag 为 `sqlite3-v<SQLite版本>`。
 
 ### 5.2 并行执行
 
-两个矩阵任务同时运行：
-- `Build sqlite3 for amd64`：在 `alpine:3.20` 容器中编译，预计耗时 1~2 分钟。
-- `Build sqlite3 for arm64`：QEMU 模拟下运行 `arm64v8/alpine`，预计耗时 3~5 分钟（模拟有性能损耗）。
+CI 编排先准备一个带固定版本号的校验源码 artifact，再并行调用三个平台工作流：
+- Linux：Linux/arm64 与 x86_64 原生构建，Linux/x86 通过 QEMU。
+- macOS：分别在 Intel 与 Apple Silicon runner 上构建、运行测试，再合并 universal2。
+- Windows：分别构建和测试 x86、x86_64、arm64。
+
+Linux 的三个矩阵任务均在其目标架构的 `alpine:latest` 容器中编译并执行 smoke test：
+- `Build and test - Linux/x86_64`：在 amd64 容器中原生编译和运行。
+- `Build and test - Linux/x86`：通过 QEMU 在 386 容器中编译和运行。
+- `Build and test - Linux/arm64`：在 arm64 runner 的 arm64 Alpine 容器中原生编译和运行。
+
+定时发布的三个平台工作流并行运行，任一失败都阻止 Release 创建。
 
 ### 5.3 产物下载
 
-Workflow 成功后，在 Actions 运行页面底部的 “Artifacts” 区域可下载：
-- `sqlite3-static-amd64.zip`
+各平台构建 Workflow 成功后，在 Actions 运行页面底部的 “Artifacts” 区域可下载临时验证产物：
+- `sqlite3-static-x86.zip`
+- `sqlite3-static-x86_64.zip`
 - `sqlite3-static-arm64.zip`
+- `sqlite3-macos-universal2.zip`
+- `sqlite3-windows-x86.zip`
+- `sqlite3-windows-x86_64.zip`
+- `sqlite3-windows-arm64.zip`
+
+macOS 的 `macos-slice-x86_64` 与 `macos-slice-arm64` 是合并 universal2 的中间产物，不作为 Release 附件发布。
+定时发布成功后，同样的二进制及 `SHA256SUMS` 会作为附件出现在对应的 GitHub Release 中。
 
 
 ## 6. 验收标准
 
 | 检查项 | 方法 | 预期结果 |
 |---|---|---|
-| amd64 为静态链接 | `file sqlite3-linux-amd64` | 输出含 `statically linked` |
-| arm64 为静态链接 | `file sqlite3-linux-arm64` | 输出含 `statically linked` |
-| amd64 可执行 | `./sqlite3-linux-amd64 --version` | 打印 SQLite 版本号 |
-| 无 glibc 依赖 | `ldd sqlite3-linux-amd64` | 输出 `not a dynamic executable` |
-| 跨环境运行 | 将 amd64 产物拷贝到 CentOS 7 或 Debian 10 运行 | 正常执行，无 `.so` 缺失报错 |
+| Linux 三种架构均为静态链接 | `file sqlite3-linux-*` | 输出含 `statically linked` 或 `static-pie linked` |
+| Linux 三种架构均可执行 | 在对应的 Alpine 目标架构容器中运行 `--version` 和 SQLite 查询 | 打印 SQLite 版本，并输出 `sqlite_version()` 查询结果 |
+| macOS universal2 | `lipo -archs`、逐 slice `otool -arch <arch> -L` 及 Intel/ARM macOS smoke test | 同时包含 x86_64/arm64；只依赖系统库；两种架构的版本和 SQL 查询成功 |
+| Windows x86/x86_64/arm64 | `dumpbin /headers`、`dumpbin /dependents` 及对应 Windows runner smoke test | 架构匹配；无 MSVC/UCRT 动态运行库；版本和 SQL 查询成功 |
+| 已发布版本跳过重复构建 | 定时运行时检查对应的 `sqlite3-v<版本>` Release | 不重新编译、不重复发布 |
+| Release 发布前置条件 | 故意使一个架构的构建/运行测试失败 | 不创建 GitHub Release |
+| Release 校验文件 | 检查 Release 附件中的 `SHA256SUMS` | 覆盖全部七个 Linux/macOS/Windows 二进制文件 |
+| 无 glibc 依赖 | `ldd sqlite3-linux-x86_64` | 输出 `not a dynamic executable` |
+| 跨环境运行 | 将 x86_64 产物拷贝到 CentOS 7 或 Debian 10 运行 | 正常执行，无 `.so` 缺失报错 |
 
 
 ## 7. 已知限制与注意事项
 
-**（1）扩展加载的兼容性**
+**（1）跨平台静态链接边界**
+只有 Linux 产物是完全静态链接并可脱离 libc 运行。macOS universal2 仍依赖系统 `libSystem`；Windows 使用 `/MT` 内嵌 MSVC/UCRT 运行库，但依赖 Windows 系统 DLL。macOS 和 Windows 产物不应描述为绝对“零依赖”。
+
+**（2）扩展加载的兼容性**
 静态链接 musl 的 SQLite 在加载动态扩展（`.so` 文件）时，若扩展本身是为 glibc 编译的，可能存在兼容性问题。本方案的目标是 SQLite CLI 本身，不涉及扩展加载场景。若后续需要支持扩展，建议扩展也以 musl 为目标编译。
 
-**（2）QEMU 模拟的性能开销**
-arm64 构建通过 QEMU 用户态模拟执行，编译速度慢于原生。对于 SQLite 这种规模（单文件 amalgamation），耗时仍在可接受范围内。若未来需要编译更大的项目，可考虑使用 GitHub Actions 的 arm64 原生 runner（公开仓库目前免费，私有仓库需付费）。
+**（3）QEMU 模拟的性能开销**
+Linux x86 构建通过 QEMU 用户态模拟执行，编译速度慢于原生。对于 SQLite 这种规模（单文件 amalgamation），耗时仍在可接受范围内。
 
-**（3）SQLite 版本升级**
-当需要升级 SQLite 版本时，只需替换仓库中的 `sqlite3.c`、`sqlite3.h`、`shell.c` 三个文件，重新触发 Workflow 即可。编译选项如需调整（如增删 `SQLITE_ENABLE_*` 宏），修改 Workflow 中的 `gcc` 命令行。
+**（4）SQLite 版本升级**
+CI 编排每次运行时自动获取 SQLite 官方下载页列出的最新 amalgamation，并使用官方 SHA3-256 元数据校验，再将相同源码 artifact 提供给全部构建平台。编译选项如需调整（如增删 `SQLITE_ENABLE_*` 宏），修改对应平台 Workflow 中的编译配置。
 
-**（4）Alpine 版本固定**
-建议固定 Alpine 镜像的版本标签（如 `3.20` 而非 `latest`），以保证构建的可复现性。musl libc 的 ABI 在 Alpine 的大版本之间保持稳定，静态链接产物不受影响。
+**（5）滚动更新与可复现性**
+按“依赖更新到最新”的要求使用 `alpine:latest` 以及 Alpine 仓库当前可用的 `build-base`。这会自动使用更新的 Alpine、musl 和编译器版本，但构建结果不再完全可复现；如需可复现构建，应将镜像和依赖版本固定到明确版本或镜像 digest。
 
 
 ## 8. 参考依据

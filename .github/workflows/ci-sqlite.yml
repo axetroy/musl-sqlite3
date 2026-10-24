@@ -1,0 +1,85 @@
+name: SQLite CI
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-sqlite-*.yml'
+      - '.github/workflows/ci-sqlite.yml'
+      - '.github/workflows/release-sqlite.yml'
+      - 'scripts/**'
+      - 'tests/**'
+  workflow_dispatch:
+    inputs:
+      sqlite_version:
+        description: SQLite version to build (blank means latest)
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-source:
+    name: Prepare verified SQLite source
+    runs-on: ubuntu-latest
+    outputs:
+      sqlite_version: ${{ steps.download.outputs.sqlite_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Test CI helper scripts
+        run: python3 -m unittest discover -s tests
+
+      - name: Download and verify SQLite amalgamation
+        id: download
+        env:
+          SQLITE_VERSION: ${{ inputs.sqlite_version }}
+        run: |
+          if [ -n "$SQLITE_VERSION" ]; then
+            python3 scripts/download_sqlite.py --version "$SQLITE_VERSION"
+          else
+            python3 scripts/download_sqlite.py
+          fi
+
+      - name: Upload verified SQLite source
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: sqlite-source
+          path: |
+            shell.c
+            sqlite3.c
+            sqlite3.h
+          if-no-files-found: error
+          retention-days: 7
+
+  build-linux:
+    name: Build and test - Linux
+    needs: prepare-source
+    uses: ./.github/workflows/build-sqlite-musl.yml
+    with:
+      sqlite_version: ${{ needs.prepare-source.outputs.sqlite_version }}
+      source_artifact: sqlite-source
+    permissions:
+      contents: read
+
+  build-macos:
+    name: Build and test - macOS
+    needs: prepare-source
+    uses: ./.github/workflows/build-sqlite-macos.yml
+    with:
+      sqlite_version: ${{ needs.prepare-source.outputs.sqlite_version }}
+      source_artifact: sqlite-source
+    permissions:
+      contents: read
+
+  build-windows:
+    name: Build and test - Windows
+    needs: prepare-source
+    uses: ./.github/workflows/build-sqlite-windows.yml
+    with:
+      sqlite_version: ${{ needs.prepare-source.outputs.sqlite_version }}
+      source_artifact: sqlite-source
+    permissions:
+      contents: read
