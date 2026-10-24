@@ -28,7 +28,7 @@ SQLite 官方预编译二进制依赖较高版本的 glibc，在低版本 Linux 
 
 ### 3.1 CI 实时下载源码
 
-无需将 SQLite 源码提交到仓库。每次 CI 运行时，从 SQLite 官方下载页解析最新发布的 `sqlite-amalgamation-*.zip`，并根据官方元数据校验文件大小和 SHA3-256 后，提取 `shell.c`、`sqlite3.c`、`sqlite3.h`。CI runner 需要可访问 `www.sqlite.org` 并提供 Python 3 标准库。
+无需将 SQLite 源码提交到仓库。每次 CI 运行时，调用仓库中的 `scripts/download_sqlite.py`，从 SQLite 官方下载页解析最新发布的 `sqlite-amalgamation-*.zip`，并根据官方元数据校验文件大小和 SHA3-256 后，提取 `shell.c`、`sqlite3.c`、`sqlite3.h`。CI runner 需要可访问 `www.sqlite.org` 并提供 Python 3 标准库。
 
 官方 amalgamation 压缩包包含 CLI 和静态编译所需的上述三个文件。使用官方发布页而非固定版本号，可以在每次运行时构建当时最新的 SQLite 稳定发布版。
 
@@ -45,7 +45,8 @@ Workflow 需要能够使用 `actions/upload-artifact` 上传产物，默认权�
 
 触发条件：
 - `workflow_dispatch`（手动触发，便于调试）
-- `push` 到 tags（如 `v*`，用于版本发布时自动构建）
+- `push` 修改 `.github/workflows/build-sqlite-musl.yml` 或 `scripts/**` 时自动构建。
+- 构建产物仅上传为 GitHub Actions Artifact，不创建 GitHub Release。
 
 ### 4.2 完整 Workflow 内容
 
@@ -55,8 +56,9 @@ name: Build Static SQLite3 (Alpine + musl)
 on:
   workflow_dispatch:
   push:
-    tags:
-      - 'v*'
+    paths:
+      - '.github/workflows/build-sqlite-musl.yml'
+      - 'scripts/**'
 
 jobs:
   build:
@@ -77,58 +79,11 @@ jobs:
             qemu-platform: arm64
 
     steps:
-      - name: Download latest SQLite amalgamation
-        run: |
-          python3 - <<'PY'
-          import csv, hashlib, io, re, shutil, urllib.request, zipfile
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
 
-          request = urllib.request.Request(
-              "https://www.sqlite.org/download.html",
-              headers={"User-Agent": "sqlite-musl-build/1.0"},
-          )
-          with urllib.request.urlopen(request, timeout=30) as response:
-              page = response.read().decode("utf-8")
-          metadata = re.search(
-              r"<!-- Download product data for scripts to read\s*(.*?)\s*-->",
-              page, re.DOTALL,
-          )
-          if metadata is None:
-              raise SystemExit("SQLite download metadata was not found")
-          rows = csv.DictReader(io.StringIO(metadata.group(1)))
-          releases = [
-              row for row in rows
-              if re.fullmatch(
-                  r"\d{4}/sqlite-amalgamation-\d+\.zip",
-                  row.get("RELATIVE-URL", ""),
-              )
-          ]
-          if not releases:
-              raise SystemExit("No SQLite amalgamation archive was listed")
-          release = max(
-              releases,
-              key=lambda row: int(
-                  re.search(r"-(\d+)\.zip$", row["RELATIVE-URL"]).group(1)
-              ),
-          )
-          with urllib.request.urlopen(
-              "https://www.sqlite.org/" + release["RELATIVE-URL"], timeout=60
-          ) as response:
-              data = response.read()
-          if len(data) != int(release["SIZE-IN-BYTES"]):
-              raise SystemExit("SQLite archive size does not match metadata")
-          if hashlib.sha3_256(data).hexdigest() != release["SHA3-HASH"].lower():
-              raise SystemExit("SQLite archive SHA3-256 does not match metadata")
-          archive_name = release["RELATIVE-URL"].rsplit("/", 1)[-1]
-          root = archive_name.removesuffix(".zip")
-          with zipfile.ZipFile(io.BytesIO(data)) as archive:
-              for filename in ("shell.c", "sqlite3.c", "sqlite3.h"):
-                  member = f"{root}/{filename}"
-                  if member not in archive.namelist():
-                      raise SystemExit(f"SQLite archive is missing {filename}")
-                  with archive.open(member) as source, open(filename, "wb") as target:
-                      shutil.copyfileobj(source, target)
-          print(f"Downloaded and verified SQLite {release['VERSION']}")
-          PY
+      - name: Download latest SQLite amalgamation
+        run: python3 scripts/download_sqlite.py
 
       # 仅 x86_64 可直接在 runner 上运行
       - name: Set up QEMU
@@ -210,7 +165,8 @@ GitHub 的 `ubuntu-latest` runner 是 x86_64，无法直接执行 32 位 x86 或
 ### 5.1 触发构建
 
 - 手动：在 GitHub 仓库 Actions 页面选择该 Workflow，点击 “Run workflow”。
-- 自动：推送 tag（如 `git tag v1.0.0 && git push origin v1.0.0`）。
+- 自动：push 修改 Workflow 文件或 `scripts/` 下 CI 脚本时触发。
+- 构建只上传临时 Actions Artifact，不发布 GitHub Release。
 
 ### 5.2 并行执行
 
