@@ -159,7 +159,10 @@ jobs:
           for binary in \
             sqlite3-linux-x86 \
             sqlite3-linux-x86_64 \
+            sqlite3-linux-arm \
             sqlite3-linux-arm64 \
+            sqlite3-linux-mips64el \
+            sqlite3-linux-loong64 \
             sqlite3-macos-universal2 \
             sqlite3-windows-x86.exe \
             sqlite3-windows-x86_64.exe \
@@ -174,7 +177,10 @@ jobs:
             sha256sum \
               sqlite3-linux-x86 \
               sqlite3-linux-x86_64 \
+              sqlite3-linux-arm \
               sqlite3-linux-arm64 \
+              sqlite3-linux-mips64el \
+              sqlite3-linux-loong64 \
               sqlite3-macos-universal2 \
               sqlite3-windows-x86.exe \
               sqlite3-windows-x86_64.exe \
@@ -191,7 +197,7 @@ jobs:
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
           Standalone SQLite CLI binaries for SQLite ${SQLITE_VERSION}.
 
-          Linux: x86, x86_64, and arm64, statically linked with musl.
+          Linux: x86, x86_64, arm, arm64, mips64el, and loong64, statically linked with musl.
           macOS: universal2 (x86_64 and arm64), with SQLite statically included;
           depends only on macOS system libraries.
           Windows: x86, x86_64, and arm64, with the MSVC runtime statically linked (/MT);

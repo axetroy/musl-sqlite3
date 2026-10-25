@@ -35,13 +35,30 @@ jobs:
           - arch: x86
             runner: ubuntu-latest
             platform: linux/386
+            toolchain: alpine
           - arch: x86_64
             runner: ubuntu-latest
             platform: linux/amd64
+            toolchain: alpine
             qemu-platform: amd64
           - arch: arm64
             runner: ubuntu-24.04-arm
             platform: linux/arm64
+            toolchain: alpine
+          - arch: arm
+            runner: ubuntu-latest
+            platform: linux/arm/v7
+            toolchain: alpine
+          - arch: mips64el
+            runner: ubuntu-latest
+            toolchain: zig
+            target: mips64el-linux-muslabi64
+            qemu: qemu-mips64el-static
+          - arch: loong64
+            runner: ubuntu-latest
+            toolchain: zig
+            target: loongarch64-linux-musl
+            qemu: qemu-loongarch64-static
 
     steps:
       - name: Checkout repository
@@ -66,12 +83,31 @@ jobs:
           fi
 
       - name: Set up QEMU
-        if: matrix.arch == 'x86'
+        if: matrix.arch == 'x86' || matrix.arch == 'arm'
         uses: docker/setup-qemu-action@v4.4.0
         with:
-          platforms: 386
+          platforms: 386,arm
+
+      - name: Set up Zig
+        if: matrix.toolchain == 'zig'
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/zig-linux-x86_64-0.17.0.tar.xz"
+          curl -fsSL https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz -o "$archive"
+          echo "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026  $archive" | sha256sum --check
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-0.17.0" >> "$GITHUB_PATH"
+
+      - name: Set up QEMU user-mode emulation
+        if: matrix.toolchain == 'zig'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y qemu-user-static
+          command -v "${{ matrix.qemu }}"
+          "${{ matrix.qemu }}" --version
 
       - name: Compile static sqlite3 inside Alpine
+        if: matrix.toolchain == 'alpine'
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/work" \
@@ -90,6 +126,19 @@ jobs:
                 -lpthread -ldl -lm
             '
 
+      - name: Cross-compile static sqlite3 with Zig
+        if: matrix.toolchain == 'zig'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          zig cc -target "$TARGET" -Os -static \
+            -DSQLITE_ENABLE_FTS5 \
+            -DSQLITE_ENABLE_JSON1 \
+            -DSQLITE_ENABLE_RTREE \
+            shell.c sqlite3.c \
+            -o "sqlite3-linux-${{ matrix.arch }}" \
+            -lpthread -ldl -lm
+
       - name: Verify static linkage
         run: |
           file sqlite3-linux-${{ matrix.arch }}
@@ -101,6 +150,7 @@ jobs:
           fi
 
       - name: Smoke test in target Alpine
+        if: matrix.toolchain == 'alpine'
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/work" \
@@ -117,6 +167,18 @@ jobs:
               printf "SQLite query result: %s\n" "$query"
               test "$query" = "$sqlite_version"
             '
+
+      - name: Smoke test under QEMU
+        if: matrix.toolchain == 'zig'
+        run: |
+          set -eu
+          version=$("${{ matrix.qemu }}" "./sqlite3-linux-${{ matrix.arch }}" --version)
+          printf "%s\n" "$version"
+          test -n "$version"
+          sqlite_version=${version%% *}
+          query=$("${{ matrix.qemu }}" "./sqlite3-linux-${{ matrix.arch }}" ":memory:" "SELECT sqlite_version();")
+          printf "SQLite query result: %s\n" "$query"
+          test "$query" = "$sqlite_version"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7.0.2
