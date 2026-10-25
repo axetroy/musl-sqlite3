@@ -1,5 +1,7 @@
 # sqlite3-static-link-prebuilt
 
+简体中文 | [English](README.en.md)
+
 为 Linux、macOS 和 Windows 构建独立的 SQLite 命令行工具。
 
 | 平台 | 架构 | 依赖说明 |
