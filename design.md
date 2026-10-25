@@ -1,4 +1,4 @@
-# 技术方案：GitHub Actions 跨平台 SQLite3 构建与发布
+# sqlite3-static-link-prebuilt 技术方案：GitHub Actions 跨平台 SQLite3 构建与发布
 
 ## 1. 背景与目标
 
