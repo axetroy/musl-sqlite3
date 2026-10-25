@@ -8,6 +8,19 @@
 | macOS | universal2（x86_64、arm64） | SQLite 编入可执行文件；依赖 macOS 系统库 |
 | Windows | x86、x86_64、arm64 | MSVC 运行库静态链接（`/MT`）；依赖 Windows 系统 DLL |
 
+## 与 SQLite 官方预编译包的区别
+
+[SQLite 官方下载页](https://sqlite.org/download.html)提供由 SQLite 项目发布的预编译工具包。本项目不是官方二进制的镜像，而是下载官方 SQLite amalgamation 源码，校验官方提供的文件大小和 SHA3-256 后，再按本项目的构建配置编译和测试。
+
+| 对比项 | SQLite 官方预编译包 | 本项目 |
+| --- | --- | --- |
+| Linux 架构与链接 | 官方下载页按其列出的系统和架构提供对应工具包；当前 Linux CLI 工具包面向 x64 | 提供 x86、x86_64、ARMv7、arm64、mips64el、loong64；全部使用 musl 静态链接，不依赖 glibc |
+| 工具内容 | 官方 Linux/macOS CLI 工具包除 `sqlite3` 外，还包含 `sqldiff`、`sqlite3_analyzer` 和 `sqlite3_rsync` | 只提供 `sqlite3` 命令行工具 |
+| 构建配置 | 由 SQLite 项目维护和发布 | 由本项目 CI 从官方源码构建，并启用 FTS5、JSON1、R*Tree |
+| 其他平台 | 以官方页面实际列出的平台和架构为准 | 提供 macOS universal2 和 Windows x86、x86_64、arm64；这些系统仍依赖操作系统提供的库或 DLL |
+
+如果需要 SQLite 官方打包的完整工具集，请使用[官方预编译包](https://sqlite.org/download.html)；如果需要 Linux musl 静态二进制或官方 Linux 工具包未列出的架构，可使用本项目。两者的编译配置可能不同，启用的扩展和运行依赖也不应假定完全一致。
+
 正式二进制和 `SHA256SUMS` 可在 [GitHub Releases](https://github.com/axetroy/sqlite3-static-link-prebuilt/releases) 下载。
 
 ## 手动构建并验证
@@ -39,3 +52,7 @@
 **SQLite Release** 工作流每周一 02:17 UTC（北京时间 10:17）检查 SQLite 官方稳定版。有新版本时会自动构建、验证并发布；push 相关 CI 文件或脚本只进行版本检查，不会因此创建 Release。
 
 更多架构、构建和发布细节见 [design.md](./design.md)。
+
+## 开源许可
+
+本项目使用 [MIT License](./LICENSE)。
